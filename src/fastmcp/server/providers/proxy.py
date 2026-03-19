@@ -10,7 +10,8 @@ from __future__ import annotations
 import base64
 import inspect
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote
 
@@ -720,8 +721,16 @@ class ProxyProvider(Provider):
         """
         return []
 
-    # lifespan() uses default implementation (empty context manager)
-    # because client cleanup is handled per-request
+    # -------------------------------------------------------------------------
+    # Instructions
+    # -------------------------------------------------------------------------
+
+    async def _fetch_remote_instructions(self) -> str | None:
+        """Fetch instructions from the remote server."""
+        client = await self._get_client()
+        async with client:
+            result = await client.initialize()
+            return result.instructions
 
 
 # -----------------------------------------------------------------------------
@@ -798,6 +807,10 @@ class FastMCPProxy(FastMCP):
     This is a convenience wrapper that creates a FastMCP server with a
     ProxyProvider. For more control, use FastMCP with add_provider(ProxyProvider(...)).
 
+    By default, the proxy fetches the remote server's instructions during
+    startup and uses them as its own. Explicitly passing ``instructions``
+    overrides this behavior.
+
     Example:
         ```python
         from fastmcp.server import create_proxy
@@ -828,10 +841,25 @@ class FastMCPProxy(FastMCP):
                            Can be either a synchronous or asynchronous function.
             **kwargs: Additional settings for the FastMCP server.
         """
+        self._explicit_instructions = "instructions" in kwargs
         super().__init__(**kwargs)
         self.client_factory = client_factory
-        provider: Provider = ProxyProvider(client_factory)
-        self.add_provider(provider)
+        self._proxy_provider: ProxyProvider = ProxyProvider(client_factory)
+        self.add_provider(self._proxy_provider)
+
+    @asynccontextmanager
+    async def _lifespan_manager(self) -> AsyncIterator[None]:
+        async with super()._lifespan_manager():
+            if not self._explicit_instructions and self.instructions is None:
+                try:
+                    instructions = (
+                        await self._proxy_provider._fetch_remote_instructions()
+                    )
+                    if instructions is not None:
+                        self.instructions = instructions
+                except Exception:
+                    logger.debug("Failed to fetch remote server instructions for proxy")
+            yield
 
 
 # -----------------------------------------------------------------------------
