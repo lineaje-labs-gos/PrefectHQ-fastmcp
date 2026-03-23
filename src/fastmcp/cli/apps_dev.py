@@ -562,7 +562,8 @@ _LOG_PANEL_HTML = """\
       <span id="mcp-log-count-badge">\u00b7 <span id="mcp-log-count">0</span></span>
     </div>
     <div id="mcp-log-actions">
-      <button id="mcp-log-reset" onclick="window.location.href='/'">Reset</button>
+      <button id="mcp-log-reset" onclick="window.location.href='/'">&#8592; Back</button>
+      <script>if (window.location.pathname === "/") document.getElementById("mcp-log-reset").style.display = "none";</script>
       <button id="mcp-log-clear">Clear</button>
       <button id="mcp-log-close">\u00d7</button>
     </div>
@@ -969,8 +970,6 @@ def _build_picker_html(tools: list[dict[str, Any]]) -> str:
             Pages,
             Select,
             SelectOption,
-            Tab,
-            Tabs,
             Textarea,
         )
         from prefab_ui.components.form import Form
@@ -1028,74 +1027,65 @@ def _build_picker_html(tools: list[dict[str, Any]]) -> str:
 
                 on_error = ShowToast(Rx("$error"), variant="error")  # type: ignore[arg-type]
 
-                _desc_max_lines = 10
+                input_mode = f"_mode_{name}"
                 with Page(name, value=name), Column(gap=4):
                     if desc:
-                        lines = desc.split("\n")
-                        md_css = "text-sm text-muted-foreground"
-                        if len(lines) <= _desc_max_lines:
-                            Markdown(desc, css_class=md_css)
-                        else:
-                            desc_state = f"_desc_{name}"
-                            short = "\n".join(lines[:_desc_max_lines])
-                            with Pages(name=desc_state, value="short"):
-                                with Page("short", value="short"):
-                                    Markdown(short, css_class=md_css)
-                                    Button(
-                                        "Show more",
-                                        variant="link",
-                                        size="sm",
-                                        on_click=SetState(desc_state, "full"),
-                                    )
-                                with Page("full", value="full"):
-                                    Markdown(desc, css_class=md_css)
-                                    Button(
-                                        "Show less",
-                                        variant="link",
-                                        size="sm",
-                                        on_click=SetState(desc_state, "short"),
-                                    )
-                    with Tabs(variant="line"):
-                        with (
-                            Tab("Form"),
-                            Form(
+                        first_para = desc.split("\n\n", 1)[0]
+                        Muted(first_para)
+
+                    with Pages(name=input_mode, value="form"):
+                        with Page("form", value="form"), Column(gap=4):
+                            with Column(gap=1, css_class="items-start"):
+                                Heading("Arguments", level=3)
+                                Button(
+                                    "Edit as JSON",
+                                    variant="link",
+                                    size="xs",
+                                    on_click=SetState(input_mode, "json"),
+                                    css_class="text-muted-foreground p-0 h-auto",
+                                )
+                            with Form(
                                 on_submit=Fetch.post(
                                     "/api/launch",
                                     body=form_body,
                                     on_success=OpenLink(RESULT),
                                     on_error=on_error,
                                 ),
-                            ),
-                        ):
-                            Form.from_model(model, fields_only=True)
-                            Button(
-                                "Launch",
-                                variant="success",
-                                button_type="submit",
-                            )
-                        with (
-                            Tab("JSON"),
-                            Form(
+                            ):
+                                Form.from_model(model, fields_only=True)
+                                Button(
+                                    "Launch",
+                                    variant="success",
+                                    button_type="submit",
+                                )
+                        with Page("json", value="json"), Column(gap=4):
+                            with Column(gap=1, css_class="items-start"):
+                                Heading("Arguments", level=3)
+                                Button(
+                                    "Use form",
+                                    variant="link",
+                                    size="xs",
+                                    on_click=SetState(input_mode, "form"),
+                                    css_class="text-muted-foreground p-0 h-auto",
+                                )
+                            with Form(
                                 on_submit=Fetch.post(
                                     "/api/launch",
                                     body=json_body,
                                     on_success=OpenLink(RESULT),
                                     on_error=on_error,
                                 ),
-                            ),
-                        ):
-                            with Column(gap=2):
-                                Label("Arguments")
+                            ):
                                 Textarea(
                                     name="_json_args",
                                     placeholder='{"key": "value"}',
                                     rows=8,
                                 )
-                            Button(
-                                "Launch",
-                                variant="success",
-                                button_type="submit",
-                            )
+                                Button(
+                                    "Launch",
+                                    variant="success",
+                                    button_type="submit",
+                                )
 
         Markdown(
             "Generated by [Prefab](https://prefab.prefect.io) 🎨",
