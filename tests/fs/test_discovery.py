@@ -1,11 +1,13 @@
 """Tests for filesystem discovery module."""
 
+import sys
 from pathlib import Path
 
 from fastmcp.prompts.base import Prompt
 from fastmcp.resources.base import Resource
 from fastmcp.resources.template import FunctionResourceTemplate, ResourceTemplate
 from fastmcp.server.providers.filesystem_discovery import (
+    _find_package_root,
     discover_and_import,
     discover_files,
     extract_components,
@@ -485,3 +487,78 @@ def my_tool(x: str) -> str:
         assert components[0].version is None
         meta = components[0].get_meta()
         assert "version" not in meta["fastmcp"]
+
+
+class TestImportMachineryFixes:
+    """Tests for import machinery correctness: sys.path cleanup, sys.modules safety, package root boundary."""
+
+    def test_syspath_not_polluted_after_import(self, tmp_path: Path):
+        """sys.path should not contain the file's parent after import_module_from_file returns."""
+        (tmp_path / "mymod.py").write_text("VALUE = 1")
+        path_before = list(sys.path)
+        import_module_from_file(tmp_path / "mymod.py")
+        assert sys.path == path_before
+
+    def test_syspath_not_polluted_after_package_import(self, tmp_path: Path):
+        """sys.path should not contain the package root's parent after a package import."""
+        pkg = tmp_path / "mypkg_syspath"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text("")
+        (pkg / "mod.py").write_text("VALUE = 2")
+        path_before = list(sys.path)
+        import_module_from_file(pkg / "mod.py", provider_root=tmp_path)
+        assert sys.path == path_before
+
+    def test_stdlib_not_shadowed_by_same_named_file(self, tmp_path: Path):
+        """A provider file named json.py must not overwrite sys.modules['json']."""
+        import json as stdlib_json
+
+        saved = sys.modules.get("json")
+        try:
+            (tmp_path / "json.py").write_text(
+                "from fastmcp.tools import tool\n@tool\ndef parse(): return 'provider'"
+            )
+            import_module_from_file(tmp_path / "json.py")
+            assert sys.modules.get("json") is stdlib_json
+        finally:
+            if saved is not None:
+                sys.modules["json"] = saved
+
+    def test_same_stem_files_get_independent_modules(self, tmp_path: Path):
+        """Two files with the same stem in different directories must not collide in sys.modules."""
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "helpers.py").write_text("ORIGIN = 'a'")
+        (dir_b / "helpers.py").write_text("ORIGIN = 'b'")
+
+        mod_a = import_module_from_file(dir_a / "helpers.py")
+        mod_b = import_module_from_file(dir_b / "helpers.py")
+
+        assert mod_a.ORIGIN == "a"
+        assert mod_b.ORIGIN == "b"
+
+    def test_package_root_bounded_by_provider_root(self, tmp_path: Path):
+        """_find_package_root must not walk above stop_at even when ancestors have __init__.py."""
+        project = tmp_path / "myproject"
+        project.mkdir()
+        (project / "__init__.py").write_text("")
+        mcp = project / "mcp"
+        mcp.mkdir()
+        (mcp / "__init__.py").write_text("")
+        (mcp / "tools.py").write_text("")
+
+        found = _find_package_root(mcp / "tools.py", stop_at=mcp)
+        assert found == mcp
+
+    def test_non_package_reload_returns_updated_content(self, tmp_path: Path):
+        """Re-importing a non-package file should reflect file changes (exec_module path)."""
+        f = tmp_path / "reloadable_np.py"
+        f.write_text("VALUE = 'original'")
+        mod = import_module_from_file(f)
+        assert mod.VALUE == "original"
+
+        f.write_text("VALUE = 'updated'")
+        mod2 = import_module_from_file(f)
+        assert mod2.VALUE == "updated"
