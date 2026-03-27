@@ -11,6 +11,7 @@ import contextlib
 import inspect
 import logging
 import weakref
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from contextvars import ContextVar, Token
@@ -182,7 +183,8 @@ _current_server: ContextVar[weakref.ref[FastMCP] | None] = ContextVar(
 # Populated in submit_to_docket() where the child server is in context;
 # consulted in get_server() when running inside a Docket worker.
 
-_task_server_map: dict[str, weakref.ref[FastMCP]] = {}
+_task_server_map: OrderedDict[str, weakref.ref[FastMCP]] = OrderedDict()
+_TASK_SERVER_MAP_MAX_SIZE = 10_000
 
 
 def register_task_server(task_id: str, server: FastMCP) -> None:
@@ -191,8 +193,13 @@ def register_task_server(task_id: str, server: FastMCP) -> None:
     Called at task-submission time (inside the child server's call_tool
     context) so that background workers can resolve CurrentFastMCP() and
     ctx.fastmcp to the child server for mounted tasks.
+
+    The map is bounded to avoid unbounded growth in long-lived servers.
+    Evicted entries fall back to the ContextVar (parent server).
     """
     _task_server_map[task_id] = weakref.ref(server)
+    while len(_task_server_map) > _TASK_SERVER_MAP_MAX_SIZE:
+        _task_server_map.popitem(last=False)
 
 
 _current_docket: ContextVar[Docket | None] = ContextVar("docket", default=None)
