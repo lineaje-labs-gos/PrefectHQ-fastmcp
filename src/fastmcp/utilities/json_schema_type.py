@@ -313,10 +313,16 @@ def _get_from_type_handler(
 
 
 def _schema_to_type(
-    schema: Mapping[str, Any],
+    schema: Mapping[str, Any] | bool,
     schemas: Mapping[str, Any],
 ) -> type | ForwardRef:
     """Convert schema to appropriate Python type."""
+    # Boolean schemas are valid in JSON Schema draft-06+:
+    # true means "any value is valid" (equivalent to {}),
+    # false means "no value is valid".
+    if isinstance(schema, bool):
+        return Any
+
     if not schema:
         return object
 
@@ -475,6 +481,10 @@ def _create_pydantic_model(
     defaults = {}
 
     for prop_name, prop_schema in properties.items():
+        # Normalize boolean schemas (JSON Schema draft-06+)
+        if isinstance(prop_schema, bool):
+            prop_schema = {}
+
         field_type = _schema_to_type(prop_schema, schemas or {})
 
         # Handle defaults
@@ -538,6 +548,10 @@ def _create_dataclass(
 
     fields: list[tuple[Any, ...]] = []
     for prop_name, prop_schema in properties.items():
+        # Normalize boolean schemas (JSON Schema draft-06+)
+        if isinstance(prop_schema, bool):
+            prop_schema = {}
+
         field_name = _sanitize_name(prop_name)
 
         # Check for self-reference in property
@@ -623,6 +637,10 @@ def _merge_defaults(
 
     # For each property in the schema
     for prop_name, prop_schema in schema.get("properties", {}).items():
+        # Normalize boolean schemas (JSON Schema draft-06+)
+        if isinstance(prop_schema, bool):
+            continue
+
         # If property is missing, apply defaults in priority order
         if prop_name not in result:
             if parent_default and prop_name in parent_default:
