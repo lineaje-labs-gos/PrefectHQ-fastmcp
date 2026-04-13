@@ -70,7 +70,6 @@ from .transports import (
     PythonStdioTransport,
     SessionKwargs,
     SSETransport,
-    StdioTransport,
     StreamableHttpTransport,
     infer_transport,
 )
@@ -433,9 +432,25 @@ class Client(
         """
         new_client = copy.copy(self)
 
-        if not isinstance(self.transport, StdioTransport):
-            # Reset session state to fresh state
-            new_client._session_state = ClientSessionState()
+        # Always reset session state so cloned clients start disconnected and do not
+        # share lifecycle state with the original instance.
+        new_client._session_state = ClientSessionState()
+
+        # Reset mutable task tracking state so new client is independent
+        new_client._task_registry = {}
+        new_client._submitted_task_ids = set()
+
+        # Create a fresh session kwargs dict so the clone doesn't share
+        # the original's mutable dict. Rebind the task notification handler
+        # to the new client if the default handler is in use; preserve any
+        # custom message handler the user may have set.
+        new_client._session_kwargs = {**self._session_kwargs}  # type: ignore[typeddict-item]
+        if isinstance(
+            self._session_kwargs.get("message_handler"), TaskNotificationHandler
+        ):
+            new_client._session_kwargs["message_handler"] = TaskNotificationHandler(
+                new_client
+            )
 
         new_client.name += f":{secrets.token_hex(2)}"
 
