@@ -530,8 +530,8 @@ class TestContentTypeHandling:
         request = director.build(route, {"name": "test"}, "https://example.com")
         assert request.headers["content-type"] == "application/json"
 
-    def test_non_json_content_type_falls_through(self, director):
-        """Non-JSON types like multipart/form-data don't get JSON-serialized."""
+    def test_non_json_content_type_uses_native_encoding(self, director):
+        """Non-JSON types like multipart/form-data use httpx's native encoding."""
         route = HTTPRoute(
             path="/upload",
             method="POST",
@@ -551,10 +551,8 @@ class TestContentTypeHandling:
         )
 
         request = director.build(route, {"file": "data"}, "https://example.com")
-        # Should fall through to httpx's json= path (not manually serialized
-        # with a multipart/form-data header), since the content type isn't
-        # JSON-compatible.
-        assert request.headers["content-type"] == "application/json"
+        # multipart/form-data should be sent as multipart, not JSON
+        assert "multipart/form-data" in request.headers["content-type"]
 
 
 class TestQueryParameterSerialization:
@@ -1152,3 +1150,193 @@ class TestPathTraversalPrevention:
         # Verify traversal didn't escape the users/ prefix
         assert decoded.startswith("https://api.example.com/api/v1/users/")
         assert url.startswith("https://api.example.com/api/v1/users/")
+
+
+class TestContentTypeDispatch:
+    """Test that non-JSON content types are dispatched correctly."""
+
+    @pytest.fixture
+    def director(self):
+        spec = SchemaPath.from_dict(
+            {
+                "openapi": "3.0.0",
+                "info": {"title": "t", "version": "1"},
+                "paths": {},
+            }
+        )
+        return RequestDirector(spec)
+
+    @pytest.fixture
+    def multipart_route(self):
+        return HTTPRoute(
+            path="/upload",
+            method="POST",
+            operation_id="upload_file",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "multipart/form-data": {
+                        "type": "object",
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "data": {"type": "string"},
+                        },
+                    }
+                },
+            ),
+            parameter_map={
+                "filename": {"location": "body", "openapi_name": "filename"},
+                "data": {"location": "body", "openapi_name": "data"},
+            },
+        )
+
+    @pytest.fixture
+    def form_urlencoded_route(self):
+        return HTTPRoute(
+            path="/login",
+            method="POST",
+            operation_id="login",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "application/x-www-form-urlencoded": {
+                        "type": "object",
+                        "properties": {
+                            "username": {"type": "string"},
+                            "password": {"type": "string"},
+                        },
+                    }
+                },
+            ),
+            parameter_map={
+                "username": {"location": "body", "openapi_name": "username"},
+                "password": {"location": "body", "openapi_name": "password"},
+            },
+        )
+
+    @pytest.fixture
+    def json_route(self):
+        return HTTPRoute(
+            path="/items",
+            method="POST",
+            operation_id="create_item",
+            request_body=RequestBodyInfo(
+                required=True,
+                content_schema={
+                    "application/json": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                        },
+                    }
+                },
+            ),
+            parameter_map={
+                "name": {"location": "body", "openapi_name": "name"},
+            },
+        )
+
+    def test_multipart_form_data_not_sent_as_json(self, director, multipart_route):
+        """multipart/form-data bodies should use httpx data= not json=."""
+        request = director.build(
+            multipart_route,
+            {"filename": "test.txt", "data": "hello"},
+        )
+        content_type = request.headers.get("content-type", "")
+        assert "multipart/form-data" in content_type
+        # Should NOT be JSON-encoded
+        assert "application/json" not in content_type
+
+    def test_form_urlencoded_not_sent_as_json(self, director, form_urlencoded_route):
+        """application/x-www-form-urlencoded bodies should use httpx data=."""
+        request = director.build(
+            form_urlencoded_route,
+            {"username": "alice", "password": "secret"},
+        )
+        content_type = request.headers.get("content-type", "")
+        assert "application/x-www-form-urlencoded" in content_type
+        assert "application/json" not in content_type
+        # Verify the body is form-encoded
+        body_text = request.content.decode("utf-8")
+        assert "username=alice" in body_text
+        assert "password=secret" in body_text
+
+    def test_json_body_still_works(self, director, json_route):
+        """application/json bodies should still be sent as JSON (regression)."""
+        request = director.build(
+            json_route,
+            {"name": "widget"},
+        )
+        content_type = request.headers.get("content-type", "")
+        assert "application/json" in content_type
+        body = json.loads(request.content.decode("utf-8"))
+        assert body == {"name": "widget"}
+
+
+class TestCookieParameters:
+    """Test that cookie parameters are properly routed."""
+
+    @pytest.fixture
+    def director(self):
+        spec = SchemaPath.from_dict(
+            {
+                "openapi": "3.0.0",
+                "info": {"title": "t", "version": "1"},
+                "paths": {},
+            }
+        )
+        return RequestDirector(spec)
+
+    @pytest.fixture
+    def cookie_route(self):
+        return HTTPRoute(
+            path="/dashboard",
+            method="GET",
+            operation_id="get_dashboard",
+            parameters=[
+                ParameterInfo(
+                    name="session_id",
+                    location="cookie",
+                    required=True,
+                    schema={"type": "string"},
+                ),
+            ],
+            parameter_map={
+                "session_id": {
+                    "location": "cookie",
+                    "openapi_name": "session_id",
+                },
+            },
+        )
+
+    def test_cookie_parameter_set_on_request(self, director, cookie_route):
+        """Cookie parameters should appear as cookies on the request."""
+        request = director.build(
+            cookie_route,
+            {"session_id": "abc123"},
+        )
+        assert "session_id" in request.headers.get("cookie", "")
+        assert "abc123" in request.headers.get("cookie", "")
+
+    def test_cookie_parameter_with_fallback_mapping(self, director):
+        """Cookie parameters should work in fallback (no parameter_map) mode."""
+        route = HTTPRoute(
+            path="/dashboard",
+            method="GET",
+            operation_id="get_dashboard",
+            parameters=[
+                ParameterInfo(
+                    name="session_id",
+                    location="cookie",
+                    required=True,
+                    schema={"type": "string"},
+                ),
+            ],
+            # No parameter_map — triggers fallback path
+        )
+        request = director.build(
+            route,
+            {"session_id": "xyz789"},
+        )
+        assert "session_id" in request.headers.get("cookie", "")
+        assert "xyz789" in request.headers.get("cookie", "")
