@@ -550,7 +550,17 @@ class Client(
         self,
         meta: dict[str, Any],
     ) -> mcp.types.InitializeResult:
-        """Initialize the MCP session while propagating MCP ``_meta`` fields."""
+        """Initialize the MCP session while propagating MCP ``_meta`` fields.
+
+        This method accesses private session attributes (``_sampling_capabilities``,
+        ``_elicitation_callback``, etc.) to reconstruct an InitializeRequest that
+        preserves the client's original capability configuration. This is necessary
+        because the MCP SDK requires explicit capability objects at initialization
+        time, and there is no public API to retrieve the currently configured
+        capabilities from a session. This fragility is a known limitation of the
+        underlying MCP client SDK; any API surface to expose these would need to
+        be proposed to the MCP spec/SDK project.
+        """
         session = self.session
 
         sampling = (
