@@ -79,11 +79,11 @@ FastMCP has three pillars:
 
 Ready to build? Start with the [installation guide](https://gofastmcp.com/getting-started/installation) or jump straight to the [quickstart](https://gofastmcp.com/getting-started/quickstart).
 
-## From prototype to production
+## Run FastMCP in production with Horizon
 
 FastMCP is how teams build MCP servers. **[Prefect Horizon](https://www.prefect.io/horizon)** is how enterprises run them in production. Register any MCP server behind a managed gateway with SSO, tool-level RBAC, audit logs, and observability. Deploy FastMCP servers and go from PR to preview in 60 seconds, then remix tools from across your registry into use-case-specific, permissioned endpoints. Horizon is everything we've learned about MCP at scale from building the world's most popular MCP framework. Free for individuals, built for teams.
 
-[Deploy your first server →](https://www.prefect.io/horizon)
+[Deploy FastMCP with Horizon →](https://www.prefect.io/horizon)
 
 ## Installation
 
