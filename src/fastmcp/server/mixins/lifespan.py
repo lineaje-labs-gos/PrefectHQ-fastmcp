@@ -171,13 +171,14 @@ class LifespanMixin:
             self._lifespan_result = user_lifespan_result
             self._lifespan_result_set = True
 
-            # Plugin entry pass: each registered plugin's `run()` async
-            # context manager wraps the server's lifespan. Runs before
-            # provider lifespans and `_started` because plugins may
-            # contribute providers. Partial-failure safety is automatic
-            # — AsyncExitStack only unwinds plugin contexts that were
-            # successfully entered, so a raising plugin doesn't tear
-            # down plugins that never entered.
+            # Plugin runtime pass: each registered plugin's `run()` async
+            # context manager wraps the server's lifespan. Contributions
+            # were already installed at add_plugin() time, so this only
+            # enters async runtime work before provider lifespans and
+            # `_started`. Partial-failure safety is automatic —
+            # AsyncExitStack only unwinds plugin contexts that were
+            # successfully entered, so a raising plugin doesn't tear down
+            # plugins that never entered.
             await self._enter_plugin_contexts(stack)
 
             # Start lifespans for all providers

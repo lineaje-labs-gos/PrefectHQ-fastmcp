@@ -38,6 +38,7 @@ from typing_extensions import Self
 
 import fastmcp
 from fastmcp.exceptions import FastMCPError
+from fastmcp.server.auth.auth import AuthProvider
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers import Provider
 from fastmcp.server.transforms import Transform
@@ -426,12 +427,12 @@ class Plugin(Generic[C]):
         # trivially.
         cls._validate_config_cls(cls._config_cls)
 
-    # Framework-internal marker. Set to True by `FastMCP.add_plugin` when
-    # the plugin is added from inside another plugin's setup() (the loader
-    # pattern). The server removes ephemeral plugins and their
-    # contributions on teardown so loaders don't accumulate duplicates
-    # across lifespan cycles.
-    _fastmcp_ephemeral: bool = False
+    # Framework-internal: the server this plugin is attached to, or None
+    # if not yet installed. Set by `install()` and checked to enforce the
+    # "one plugin instance per server" contract — plugin instances are
+    # single-server by design so plugin authors don't have to reason about
+    # per-server state isolation for contributions and lifecycle hooks.
+    _installed_on: FastMCP | None = None
 
     def __init__(self, config: C | dict[str, Any] | None = None) -> None:
         meta = getattr(type(self), "meta", None)
@@ -615,23 +616,58 @@ class Plugin(Generic[C]):
 
     # -- lifecycle ------------------------------------------------------------
 
+    def on_install(self, server: FastMCP) -> None:
+        """Optional sync hook run when the plugin is attached to a server.
+
+        The framework calls this exactly once, from inside
+        `FastMCP.add_plugin()`, after the plugin has been recorded in the
+        server's plugin list but before its contribution hooks are
+        pulled. Default: no-op.
+
+        Override to do server-aware synchronous setup — stash a server
+        reference, compute derived state that contribution hooks depend
+        on, or recursively register child plugins (the "loader" pattern):
+
+        ```python
+        class ConfigLoader(Plugin[LoaderConfig]):
+            def on_install(self, server):
+                for spec in self.config.children:
+                    server.add_plugin(build_plugin(spec))
+        ```
+
+        Child plugins registered from `on_install` appear after this
+        plugin in `server.plugins`, preserving parent-before-child
+        registration order.
+
+        Async setup belongs in `run()` / `setup()`, not here. `on_install`
+        is synchronous because it runs inside `FastMCP.__init__` before
+        any event loop exists.
+        """
+
     @asynccontextmanager
     async def run(self, server: FastMCP) -> AsyncIterator[None]:
-        """Async context manager wrapping the plugin's lifetime.
+        """Async context manager wrapping the plugin's runtime lifetime.
+
+        Used for **async work only** — the plugin's contributions are
+        already installed by the time `run()` is entered. Opening database
+        connections, starting background tasks, hydrating an
+        already-installed provider with live state: all fine. Registering
+        additional plugins, middleware, or providers here is discouraged:
+        use `on_install()` for plugin composition so the server graph is
+        configured before runtime work begins.
 
         The framework enters `async with plugin.run(server):` on the
-        server's lifespan stack. Everything before the `yield` runs
-        during startup (in plugin registration order); the `yield` spans
-        the server's active lifetime; everything after the `yield` runs
-        on shutdown (in reverse registration order). Cancellation on
-        shutdown unwinds the context manager automatically.
+        server's lifespan stack once per lifespan cycle. Everything before
+        the `yield` runs during startup (in registration order); the
+        `yield` spans the server's active lifetime; everything after
+        runs on shutdown (reverse order).
 
         The default implementation calls `setup(server)` before the
         `yield` and `teardown()` after it, so plugins that just need
-        one-shot init/cleanup can keep overriding just those two
-        methods. Long-running plugins (channels, integration bridges,
-        background workers) override `run()` directly to use
-        `async with` for resource management and task groups:
+        one-shot init/cleanup can keep overriding just those two methods.
+        Long-running plugins (channels, integration bridges, background
+        workers) override `run()` directly to use `async with` for
+        resource management and task groups:
 
             @asynccontextmanager
             async def run(self, server):
@@ -656,10 +692,14 @@ class Plugin(Generic[C]):
         """One-shot async initialization. Called by the default `run()`
         before the `yield`.
 
-        Override for simple init work — compile regexes, warm caches,
-        open connections, register additional plugins from a loader. For
-        anything involving long-lived resources or background tasks,
-        override `run()` directly instead and use `async with`.
+        Override for simple async init work — open connections, warm
+        caches, hydrate an already-installed provider. For anything
+        involving long-lived resources or background tasks, override
+        `run()` directly instead and use `async with`.
+
+        Prefer `on_install()` for registering additional plugins or
+        contributions so plugin composition happens at install time, before
+        async runtime work begins.
         """
 
     async def teardown(self) -> None:
@@ -684,6 +724,34 @@ class Plugin(Generic[C]):
     def providers(self) -> list[Provider]:
         """Return component providers."""
         return []
+
+    def auth(self) -> AuthProvider | None:
+        """Return the auth provider this plugin contributes, or `None`.
+
+        Any `AuthProvider` subclass is accepted — a `TokenVerifier`, a
+        full OAuth server (`OAuthProvider` / `RemoteAuthProvider` /
+        `OAuthProxy`), or a pre-composed `MultiAuth`.
+
+        FastMCP's auth slot is **singular**. Across the user-declared
+        `auth=` and every plugin's `auth()` return, at most one
+        `AuthProvider` may be active. Multiple contributors raise
+        `PluginError` with an error that names every source so the
+        operator can resolve the conflict explicitly.
+
+        **Best practice for plugins that contribute auth**: expose a
+        config knob (conventionally `enable_auth: bool = True`) so users
+        who want the plugin's other features but prefer different auth
+        can disable it without framework-level composition rules. Return
+        `None` when the knob is off.
+
+        For genuine multi-source auth, users construct a `MultiAuth`
+        explicitly and pass it as the single `auth=` arg — the framework
+        never auto-composes, because silent composition produces
+        surprising behavior at token-verification time.
+
+        The default returns `None`.
+        """
+        return None
 
     def capabilities(self) -> dict[str, Any]:
         """Return a partial `ServerCapabilities` dict to merge into the server's capabilities.

@@ -391,6 +391,14 @@ class FastMCP(
         )
 
         self.auth: AuthProvider | None = auth
+        # Identifies where `self.auth` came from, for a clear error if a
+        # plugin later contributes a second auth provider. `None` while
+        # `self.auth` is `None`; set to `"user-declared auth="` when the
+        # caller passes `auth=...` and to `"plugin '<name>'"` when a
+        # plugin contributes one.
+        self._auth_source: str | None = (
+            "user-declared auth=" if auth is not None else None
+        )
 
         if tools:
             for tool in tools:
@@ -420,28 +428,11 @@ class FastMCP(
             self.middleware.append(DereferenceRefsMiddleware())
 
         # Plugin registry: an ordered list, populated by `add_plugin()` and
-        # `plugins=[...]`. Each plugin's `run()` async context manager wraps
-        # the server's lifespan (see `_enter_plugin_contexts`).
+        # `plugins=[...]`. Plugins install their contributions synchronously
+        # at `add_plugin()` time; each plugin's `run()` async context manager
+        # wraps the server's lifespan (see `_enter_plugin_contexts`).
         self.plugins: list[Plugin] = []
-        # Plugins whose contributions (middleware/transforms/providers/routes)
-        # have been collected onto the server. Server contributions persist
-        # across lifespan cycles like server-authored middleware, so we
-        # don't re-install them on re-entry.
-        self._plugins_contributed: set[int] = set()
-        # Plugins whose `run()` context has been entered in the current
-        # lifespan cycle. Used to dedupe entry when the same instance is
-        # registered twice; reset after the cycle's ephemeral cleanup.
-        self._plugins_entered: set[int] = set()
-        # Per-plugin record of contributions we installed, stored as
-        # (container, item) tuples so we can reverse them when an
-        # ephemeral plugin is torn down.
-        self._plugin_contributions: dict[int, list[tuple[list[Any], Any]]] = {}
-        # True while the plugin-entry loop is running. `add_plugin()` uses
-        # this to flag ephemeral plugins — plugins added from inside
-        # another plugin's `run()` (the loader pattern). Ephemeral plugins
-        # are removed after all plugin contexts exit so loaders can
-        # freshly re-hydrate children on the next lifespan cycle.
-        self._in_plugin_setup_pass: bool = False
+        self._plugin_capabilities: dict[int, dict[str, Any]] = {}
         for p in plugins or []:
             self.add_plugin(p)
 
@@ -512,182 +503,108 @@ class FastMCP(
     def add_plugin(self, plugin: Plugin) -> None:
         """Register a plugin with this server.
 
-        Appends the plugin to the server's ordered plugin list and
-        synchronously collects its HTTP routes (see below). Middleware,
-        transforms, and providers are collected later, during the
-        server's startup sequence, because those hooks may reference
-        state the plugin populates while its `run()` context is active.
+        Collects all of the plugin's contributions — providers, middleware,
+        transforms, routes, auth, capabilities — synchronously, once, at
+        registration time. Plugin lifecycle (`run()` / `setup()` /
+        `teardown()`) is strictly for async runtime work.
 
-        HTTP routes are collected eagerly because HTTP transports snapshot
-        the server's route list when they construct the Starlette app —
-        which happens before the lifespan runs. A route returned by
-        `plugin.routes()` after the app is built would sit in
-        `_additional_http_routes` but never be mounted and would always
-        404. Collecting at registration time keeps non-loader plugins
-        working for HTTP transports.
+        The plugin's `on_install(server)` hook runs first, which enforces the
+        "one plugin instance per server" contract (plugins are single-
+        server by design — construct a fresh instance for each server
+        rather than sharing). After `on_install()` returns, contribution
+        hooks are called and their results are applied. If any step
+        raises, registration fails loudly; the caller should discard the
+        partially configured server rather than expect best-effort
+        recovery.
 
-        Loader caveat: plugins added from inside another plugin's
-        `run()` (the loader pattern) can still contribute middleware,
-        transforms, and providers, but their routes may not be reachable
-        over HTTP/SSE transports — those transports' route lists are
-        already fixed by the time `run()` enters. Loaders that need to
-        contribute routes should use the stdio transport or expose the
-        routes via a non-loader plugin registered at construction time.
+        Dynamic plugin loading (the "loader" pattern) is supported via
+        `Plugin.on_install(server)`, which may call `server.add_plugin()`
+        recursively. That path runs entirely at registration time, so
+        the resulting plugin tree is installed before runtime work starts.
 
         Args:
-            plugin: A :class:`Plugin` instance. Plugins are registered in
-                the order they are added; middleware is a stack.
+            plugin: A :class:`Plugin` instance.
 
         Raises:
-            PluginError: If called after the server's plugin-entry pass
-                has completed (except from inside a loader plugin's
-                `run()`), or if the plugin's `fastmcp_version`
-                compatibility check fails.
+            PluginError: If the plugin is already installed on a server,
+                if the plugin's `fastmcp_version` compatibility check
+                fails, or if another source has already contributed auth.
         """
-        # Reject registration once the lifespan is active and we're past
-        # the plugin-entry pass. The loader-pattern exception is the only
-        # case where add_plugin() runs during a live lifespan, and it's
-        # gated by `_in_plugin_setup_pass`. Checking `_started` alone is
-        # too narrow: `_started` is only set after provider lifespans
-        # enter and is cleared before teardown, leaving windows in which
-        # add_plugin() would silently register a plugin whose `run()`
-        # never enters for the current cycle.
-        if self._lifespan_result_set and not self._in_plugin_setup_pass:
-            raise PluginError(
-                f"Cannot add plugin {plugin.meta.name!r}: the server's "
-                "plugin-entry pass has already completed. Register "
-                "plugins before the server starts, or from inside "
-                "another plugin's `run()` (the loader pattern)."
-            )
         plugin.check_fastmcp_compatibility()
-        # Compute routes up front so a failure inside plugin.routes() does
-        # not leave a half-registered plugin in self.plugins.
-        routes = list(plugin.routes())
+        if plugin._installed_on is not None:
+            raise PluginError(
+                f"Plugin {plugin.meta.name!r} is already installed on "
+                f"{plugin._installed_on.name!r}. Plugin instances are "
+                "single-server by design — construct a fresh instance "
+                "per server rather than sharing one across servers."
+            )
+
+        # Attach and append FIRST so any children registered recursively
+        # by `on_install` land after this plugin in `self.plugins`,
+        # preserving parent-before-child registration order in the plugin
+        # list. Child contribution side effects still occur when the
+        # child is added from on_install.
+        plugin._installed_on = self
         self.plugins.append(plugin)
-        # Flag loader-added plugins as ephemeral so teardown can remove
-        # them along with their contributions. Written unconditionally so
-        # re-registering an instance that was previously marked ephemeral
-        # (added inside a setup pass and then cleaned up) as a permanent
-        # plugin clears the stale marker rather than inheriting it.
-        plugin._fastmcp_ephemeral = self._in_plugin_setup_pass
-        records = self._plugin_contributions.setdefault(id(plugin), [])
-        for route in routes:
+
+        plugin.on_install(self)
+
+        # Gather everything up front: any hook that raises must not have
+        # mutated server state. Auth is the only hook that can conflict
+        # with prior server state (the singular-auth-slot rule), so we
+        # validate it before committing anything else.
+        contributed_auth = plugin.auth()
+        contributed_capabilities = plugin.capabilities()
+        contributed_mws = list(plugin.middleware())
+        contributed_transforms = list(plugin.transforms())
+        contributed_providers = list(plugin.providers())
+        contributed_routes = list(plugin.routes())
+
+        if contributed_auth is not None and self.auth is not None:
+            prior = self._auth_source or "user-declared auth="
+            raise PluginError(
+                f"Multiple auth sources declared: {prior}, "
+                f"plugin {plugin.meta.name!r}. FastMCP accepts a "
+                "single auth provider. Disable auth on all but one "
+                "source (typically via the plugin's config), or "
+                "construct a `MultiAuth` explicitly in Python and "
+                "pass it as the single `auth=` arg."
+            )
+
+        # Commit. From here we do not raise.
+        self._plugin_capabilities[id(plugin)] = contributed_capabilities
+        for mw in contributed_mws:
+            self.add_middleware(mw)
+        for transform in contributed_transforms:
+            self.add_transform(transform)
+        for provider in contributed_providers:
+            self.add_provider(provider)
+        for route in contributed_routes:
             self._additional_http_routes.append(route)
-            records.append((self._additional_http_routes, route))
+        if contributed_auth is not None:
+            self.auth = contributed_auth
+            self._auth_source = f"plugin {plugin.meta.name!r}"
 
     async def _enter_plugin_contexts(self, stack: AsyncExitStack) -> None:
         """Enter each registered plugin's `run()` context on the given stack.
 
-        Called during server startup (from `_lifespan_manager`), before
-        the server binds. Iterates the plugin list in order, entering
-        `async with plugin.run(server):` on the shared exit stack for
-        each plugin. Plugins added during another plugin's `run()` (the
-        loader pattern) are picked up by the same loop because the
-        iteration advances against a live index.
+        Called once per server lifespan. Contributions were collected when
+        each plugin was registered via `add_plugin()`. All this loop does
+        is wrap each plugin's async runtime lifetime around the server's
+        lifespan.
 
-        Contributions (middleware, transforms, providers) are collected
-        once per plugin across all lifespan cycles — once installed, they
-        persist on the server just like server-authored middleware.
-        Routes were already collected synchronously at `add_plugin()`
-        time so HTTP transports see them before the lifespan runs.
-
-        Ephemeral cleanup is registered as a post-stack callback so it
-        runs after every plugin's `run()` has exited but before the
-        outer server lifespan unwinds further.
+        Order: registration order on entry, reverse order on exit (the
+        exit stack handles the reversal automatically). Exceptions inside
+        a plugin's `run()` body unwind already-entered contexts cleanly.
         """
-        # Register ephemeral cleanup FIRST so it unwinds LAST (after all
-        # plugin.run() contexts have exited).
-        stack.push_async_callback(self._cleanup_ephemeral_plugins)
-
-        # Plugin-entry loop: mutating-list iteration. New plugins appended
-        # by a plugin's run() (loader pattern) are picked up on subsequent
-        # iterations. `_in_plugin_setup_pass` lets add_plugin() mark those
-        # as ephemeral (see add_plugin). `_plugins_entered` dedupes: a
-        # plugin instance registered twice only enters its run() once per
-        # lifespan cycle, keeping setup/teardown counts symmetric.
-        self._in_plugin_setup_pass = True
-        try:
-            i = 0
-            while i < len(self.plugins):
-                plugin = self.plugins[i]
-                i += 1
-                if id(plugin) in self._plugins_entered:
-                    continue
-                self._plugins_entered.add(id(plugin))
-                try:
-                    await stack.enter_async_context(plugin.run(self))
-                except Exception:
-                    logger.exception(
-                        "Plugin %r raised while entering run()", plugin.meta.name
-                    )
-                    raise
-        finally:
-            self._in_plugin_setup_pass = False
-
-        # Contribution collection: run in registration order. Guarded
-        # per-plugin because contributions persist across lifespan cycles;
-        # new plugins (e.g. added by a loader during this cycle's run)
-        # still get their contributions collected. Routes are collected
-        # synchronously at add_plugin() time (see above).
         for plugin in self.plugins:
-            if id(plugin) in self._plugins_contributed:
-                continue
-            # Gather everything first: any hook that raises aborts before
-            # any server state is mutated, so a retry on the next lifespan
-            # cycle starts clean rather than appending duplicate middleware
-            # on top of partial contributions.
-            mws = list(plugin.middleware())
-            transforms_ = list(plugin.transforms())
-            providers_ = list(plugin.providers())
-
-            records = self._plugin_contributions.setdefault(id(plugin), [])
-            for mw in mws:
-                self.add_middleware(mw)
-                records.append((self.middleware, mw))
-            for transform in transforms_:
-                self.add_transform(transform)
-                records.append((self._transforms, transform))
-            for provider in providers_:
-                # add_provider may wrap the value (for example a FastMCP
-                # is wrapped in FastMCPProvider). Record whatever
-                # actually landed in self.providers so teardown can find
-                # it by identity.
-                before = len(self.providers)
-                self.add_provider(provider)
-                for stored in self.providers[before:]:
-                    records.append((self.providers, stored))
-            self._plugins_contributed.add(id(plugin))
-
-    async def _cleanup_ephemeral_plugins(self) -> None:
-        """Remove ephemeral (loader-added) plugins after all contexts have exited.
-
-        Runs as an `AsyncExitStack` callback registered in
-        `_enter_plugin_contexts` so it fires after every plugin's `run()`
-        has unwound. Without this, each lifespan cycle would accumulate a
-        fresh generation of loader-added children in `self.plugins`, and
-        their contributions would accumulate in the server's
-        middleware/transform/provider lists.
-        """
-        # Reset the per-cycle entered set for the next cycle.
-        self._plugins_entered = set()
-
-        ephemeral = [p for p in self.plugins if getattr(p, "_fastmcp_ephemeral", False)]
-        for plugin in ephemeral:
-            records = self._plugin_contributions.pop(id(plugin), [])
-            for container, item in reversed(records):
-                # Remove by identity rather than equality so a permanent
-                # contribution that happens to compare equal to `item`
-                # (e.g. a dataclass-style middleware with value-based
-                # `__eq__`) is not accidentally stripped. list.remove()
-                # uses `==`, which is the wrong matcher here.
-                for i, entry in enumerate(container):
-                    if entry is item:
-                        del container[i]
-                        break
-            self._plugins_contributed.discard(id(plugin))
-        self.plugins = [
-            p for p in self.plugins if not getattr(p, "_fastmcp_ephemeral", False)
-        ]
+            try:
+                await stack.enter_async_context(plugin.run(self))
+            except Exception:
+                logger.exception(
+                    "Plugin %r raised while entering run()", plugin.meta.name
+                )
+                raise
 
     def _apply_plugin_capabilities(
         self, capabilities: mcp.types.ServerCapabilities
@@ -702,7 +619,9 @@ class FastMCP(
         update, applied recursively. Plugins that return an empty dict
         contribute nothing.
         """
-        contributions = [plugin.capabilities() for plugin in self.plugins]
+        contributions = [
+            self._plugin_capabilities.get(id(plugin), {}) for plugin in self.plugins
+        ]
         if not any(contributions):
             return capabilities
 
