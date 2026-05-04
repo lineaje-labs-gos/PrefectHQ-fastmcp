@@ -1,0 +1,85 @@
+---
+title: Auth Plugins
+description: Configure FastMCP authentication with first-party plugins.
+icon: puzzle-piece
+---
+
+Auth plugins are the plugin-system entry point for FastMCP's built-in auth integrations. They wrap the existing auth providers and contribute exactly one provider through `Plugin.auth()`, so the server behavior is the same as passing `auth=...` directly.
+
+Use an auth plugin when you want authentication to be configured alongside other plugins, especially in declarative environments such as Horizon or `plugins.json`-style loaders.
+
+```python server.py
+from fastmcp import FastMCP
+from fastmcp.server.plugins.auth import GitHubAuth
+
+mcp = FastMCP(
+    "GitHub Protected Server",
+    plugins=[
+        GitHubAuth(
+            {
+                "client_id": "your-github-client-id",
+                "client_secret": "your-github-client-secret",
+                "base_url": "https://your-server.com",
+            }
+        )
+    ],
+)
+```
+
+The provider APIs remain available and are still the most direct option in Python code:
+
+```python
+from fastmcp import FastMCP
+from fastmcp.server.auth.providers.github import GitHubProvider
+
+auth = GitHubProvider(
+    client_id="your-github-client-id",
+    client_secret="your-github-client-secret",
+    base_url="https://your-server.com",
+)
+
+mcp = FastMCP("GitHub Protected Server", auth=auth)
+```
+
+## Included Plugins
+
+Import first-party auth plugins from `fastmcp.server.plugins.auth`:
+
+```python
+from fastmcp.server.plugins.auth import (
+    Auth0Auth,
+    AuthKitAuth,
+    AWSCognitoAuth,
+    AzureAuth,
+    ClerkAuth,
+    DescopeAuth,
+    DiscordAuth,
+    GitHubAuth,
+    GoogleAuth,
+    KeycloakAuth,
+    OCIAuth,
+    PropelAuth,
+    ScalekitAuth,
+    SupabaseAuth,
+    WorkOSAuth,
+)
+```
+
+Each plugin accepts a matching `*AuthConfig` model or a plain dictionary. Config fields mirror the wrapped provider's constructor wherever the value can be represented as JSON. Python-only objects such as custom token verifiers, HTTP clients, and client storage are passed as constructor keyword arguments:
+
+```python
+from fastmcp.server.plugins.auth import SupabaseAuth, SupabaseAuthConfig
+
+auth_plugin = SupabaseAuth(
+    SupabaseAuthConfig(
+        project_url="https://abc123.supabase.co",
+        base_url="https://your-server.com",
+        required_scopes=["read"],
+    ),
+    token_verifier=custom_verifier,
+)
+
+mcp = FastMCP("Supabase Protected Server", plugins=[auth_plugin])
+```
+
+Only one auth provider can be configured for a server. If a server already has `auth=...`, or if multiple plugins contribute auth, FastMCP raises during plugin installation.

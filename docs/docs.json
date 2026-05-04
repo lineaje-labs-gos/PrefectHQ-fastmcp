@@ -172,6 +172,7 @@
                         "icon": "key",
                         "pages": [
                           "servers/auth/authentication",
+                          "servers/auth/plugins",
                           "servers/auth/token-verification",
                           "servers/auth/remote-oauth",
                           "servers/auth/oauth-proxy",
