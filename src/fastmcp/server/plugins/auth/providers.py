@@ -14,23 +14,6 @@ from key_value.aio.protocols import AsyncKeyValue
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict
 
 from fastmcp.server.auth import AuthProvider, TokenVerifier
-from fastmcp.server.auth.providers.auth0 import Auth0Provider
-from fastmcp.server.auth.providers.aws import AWSCognitoProvider
-from fastmcp.server.auth.providers.azure import AzureProvider
-from fastmcp.server.auth.providers.clerk import ClerkProvider
-from fastmcp.server.auth.providers.descope import DescopeProvider
-from fastmcp.server.auth.providers.discord import DiscordProvider
-from fastmcp.server.auth.providers.github import GitHubProvider
-from fastmcp.server.auth.providers.google import GoogleProvider
-from fastmcp.server.auth.providers.keycloak import KeycloakAuthProvider
-from fastmcp.server.auth.providers.oci import OCIProvider
-from fastmcp.server.auth.providers.propelauth import (
-    PropelAuthProvider,
-    PropelAuthTokenIntrospectionOverrides,
-)
-from fastmcp.server.auth.providers.scalekit import ScalekitProvider
-from fastmcp.server.auth.providers.supabase import SupabaseProvider
-from fastmcp.server.auth.providers.workos import AuthKitProvider, WorkOSProvider
 from fastmcp.server.plugins.base import Plugin, PluginMeta
 
 ConsentMode = bool | Literal["remember", "external"]
@@ -114,7 +97,11 @@ class Auth0Auth(_AuthPlugin[Auth0AuthConfig]):
         self._client_storage = client_storage
 
     def auth(self) -> AuthProvider | None:
-        self._require("config_url", "client_id", "client_secret", "audience", "base_url")
+        from fastmcp.server.auth.providers.auth0 import Auth0Provider
+
+        self._require(
+            "config_url", "client_id", "client_secret", "audience", "base_url"
+        )
         return Auth0Provider(
             **self._kwargs(
                 "config_url",
@@ -158,6 +145,8 @@ class AuthKitAuth(_AuthPlugin[AuthKitAuthConfig]):
         self._token_verifier = token_verifier
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.workos import AuthKitProvider
+
         self._require("authkit_domain", "base_url")
         return AuthKitProvider(
             **self._kwargs(
@@ -198,6 +187,8 @@ class AWSCognitoAuth(_AuthPlugin[AWSCognitoAuthConfig]):
         self._client_storage = client_storage
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.aws import AWSCognitoProvider
+
         self._require("user_pool_id", "client_id", "client_secret", "base_url")
         return AWSCognitoProvider(
             **self._kwargs(
@@ -247,6 +238,8 @@ class AzureAuth(_AuthPlugin[AzureAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.azure import AzureProvider
+
         self._require("client_id", "tenant_id", "required_scopes", "base_url")
         self._require_one("client_secret", "jwt_signing_key")
         return AzureProvider(
@@ -299,6 +292,8 @@ class ClerkAuth(_AuthPlugin[ClerkAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.clerk import ClerkProvider
+
         self._require("domain", "client_id", "base_url")
         self._require_one("client_secret", "jwt_signing_key")
         return ClerkProvider(
@@ -349,6 +344,8 @@ class DescopeAuth(_AuthPlugin[DescopeAuthConfig]):
         self._token_verifier = token_verifier
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.descope import DescopeProvider
+
         self._require("base_url")
         if self.config.config_url is None:
             self._require("project_id", "descope_base_url")
@@ -388,6 +385,8 @@ class DiscordAuth(_AuthPlugin[DiscordAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.discord import DiscordProvider
+
         self._require("client_id", "client_secret", "base_url")
         return DiscordProvider(
             **self._kwargs(
@@ -435,6 +434,8 @@ class GitHubAuth(_AuthPlugin[GitHubAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.github import GitHubProvider
+
         self._require("client_id", "client_secret", "base_url")
         return GitHubProvider(
             **self._kwargs(
@@ -484,6 +485,8 @@ class GoogleAuth(_AuthPlugin[GoogleAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.google import GoogleProvider
+
         self._require("client_id", "base_url")
         self._require_one("client_secret", "jwt_signing_key")
         return GoogleProvider(
@@ -534,6 +537,8 @@ class KeycloakAuth(_AuthPlugin[KeycloakAuthConfig]):
         self._token_verifier = token_verifier
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.keycloak import KeycloakAuthProvider
+
         self._require("realm_url", "base_url")
         return KeycloakAuthProvider(
             **self._kwargs("realm_url", "base_url", "required_scopes", "audience"),
@@ -565,6 +570,8 @@ class OCIAuth(_AuthPlugin[OCIAuthConfig]):
         self._client_storage = client_storage
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.oci import OCIProvider
+
         self._require("config_url", "client_id", "client_secret", "base_url")
         return OCIProvider(
             **self._kwargs(
@@ -614,6 +621,11 @@ class PropelAuth(_AuthPlugin[PropelAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.propelauth import (
+            PropelAuthProvider,
+            PropelAuthTokenIntrospectionOverrides,
+        )
+
         self._require(
             "auth_url",
             "introspection_client_id",
@@ -670,6 +682,8 @@ class ScalekitAuth(_AuthPlugin[ScalekitAuthConfig]):
         self._token_verifier = token_verifier
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.scalekit import ScalekitProvider
+
         self._require("environment_url", "resource_id")
         self._require_one("base_url", "mcp_url")
         return ScalekitProvider(
@@ -711,6 +725,8 @@ class SupabaseAuth(_AuthPlugin[SupabaseAuthConfig]):
         self._token_verifier = token_verifier
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.supabase import SupabaseProvider
+
         self._require("project_url", "base_url")
         return SupabaseProvider(
             **self._kwargs(
@@ -750,6 +766,8 @@ class WorkOSAuth(_AuthPlugin[WorkOSAuthConfig]):
         self._http_client = http_client
 
     def auth(self) -> AuthProvider | None:
+        from fastmcp.server.auth.providers.workos import WorkOSProvider
+
         self._require("client_id", "client_secret", "authkit_domain", "base_url")
         return WorkOSProvider(
             **self._kwargs(

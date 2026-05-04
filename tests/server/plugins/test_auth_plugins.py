@@ -247,7 +247,13 @@ PROVIDER_CASES: list[tuple[type, type, dict[str, Any], type]] = [
 
 
 def _plugin_kwargs(plugin_cls: type) -> dict[str, Any]:
-    if plugin_cls in {AuthKitAuth, DescopeAuth, KeycloakAuth, ScalekitAuth, SupabaseAuth}:
+    if plugin_cls in {
+        AuthKitAuth,
+        DescopeAuth,
+        KeycloakAuth,
+        ScalekitAuth,
+        SupabaseAuth,
+    }:
         return {"token_verifier": _verifier()}
     return {}
 
